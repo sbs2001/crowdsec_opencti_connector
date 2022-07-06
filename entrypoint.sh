@@ -4,5 +4,5 @@
 cd /opt/opencti-crowdsec
 
 # Start the connector
-python3 main.py
+python3 crowdsec.py
 

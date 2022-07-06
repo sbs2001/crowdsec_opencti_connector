@@ -1,13 +1,12 @@
+import itertools
 import json
 import os
 import re
-import itertools
-import pycountry
-from typing import Dict
 from time import sleep
+from typing import Dict
 from urllib.parse import urljoin
 
-
+import pycountry
 import requests
 import yaml
 from pycti import OpenCTIConnectorHelper, get_config_variable
@@ -26,9 +25,8 @@ class CrowdSecConnector:
             else {}
         )
         self.helper = OpenCTIConnectorHelper(config)
-        self.helper.log_info(json.dumps(config))
+        self.helper.log_debug("Config= " + json.dumps(config))
         self.crowdsec_cti_key = get_config_variable("CROWDSEC_KEY", ["crowdsec", "key"], config)
-        self.helper.log_info("cti key is " + self.crowdsec_cti_key)
         self.crowdsec_api_version = get_config_variable(
             "CROWDSEC_VERSION", ["crowdsec", "api_version"], config, default="v1"
         )
@@ -53,9 +51,14 @@ class CrowdSecConnector:
                 return {}
             elif resp.status_code == 429:
                 self.helper.log_warning(f"API call quota exceeded, will retry after {2**i}s")
-                sleep(2**i)
-            else:
+            elif resp.status_code == 200:
                 return resp.json()
+            else:
+                self.helper.log_info(f"CrowdSec CTI response {resp.text}")
+                self.helper.log_warning(
+                    f"CrowdSec CTI returned {resp.status_code} response status code. Retrying.."
+                )
+            sleep(2**i)
 
     def get_or_create_crowdsec_ent_id(self) -> int:
         if getattr(self, "crowdsec_id", None) is not None:
@@ -64,7 +67,7 @@ class CrowdSecConnector:
             name=self.crowdsec_ent_name
         )
         if not crowdsec_ent:
-            self.helper.log_info(f"Creating {self.crowdsec_ent_name} entity")
+            self.helper.log_debug(f"Creating {self.crowdsec_ent_name} entity")
             self.crowdsec_id = self.helper.api.identity.create(
                 type="Organization",
                 name=self.crowdsec_ent_name,
@@ -81,7 +84,7 @@ class CrowdSecConnector:
         if not cti_data:
             return
 
-        self.helper.log_info("Creating External Reference")
+        self.helper.log_debug("Creating External Reference")
         external_reference = self.helper.api.external_reference.create(
             source_name="CrowdSec CTI",
             url=urljoin(self.api_base_url, f"smoke/{ip}"),
@@ -90,8 +93,7 @@ class CrowdSecConnector:
         self.helper.api.stix_cyber_observable.add_external_reference(
             id=observable_id, external_reference_id=external_reference["id"]
         )
-        self.helper.log_info("Creating sighting relationship")
-        self.helper.log_info("Ent ID " + self.get_or_create_crowdsec_ent_id())
+        self.helper.log_debug("Creating sighting relationship")
         self.helper.api.stix_sighting_relationship.create(
             fromId=observable["id"],
             toId=self.get_or_create_crowdsec_ent_id(),
@@ -122,37 +124,35 @@ class CrowdSecConnector:
                     first_seen=cti_data["history"]["first_seen"],
                     last_seen=cti_data["history"]["last_seen"],
                     confidence=self.helper.connect_confidence_level,
-                )   
-        self.helper.log_info("Doing country enrichment")
-        for country_alpha_2, val in cti_data["target_countries"].items():
-            country_info = pycountry.countries.get(
-                alpha_2=country_alpha_2
-            )
-            country = self.helper.api.location.create(
-                    name=country_info.name,
-                    type="Country",
-                    country=country_info.official_name
-                    if hasattr(country_info, "official_name")
-                    else country_info.name,
-                    custom_properties={
-                        "x_opencti_location_type": "Country",
-                        "x_opencti_aliases": [
-                            country_info.official_name
-                            if hasattr(country_info, "official_name")
-                            else country_info.name
-                        ],
-                    },
                 )
+        self.helper.log_debug("Doing country enrichment")
+        for country_alpha_2, val in cti_data["target_countries"].items():
+            country_info = pycountry.countries.get(alpha_2=country_alpha_2)
+            country = self.helper.api.location.create(
+                name=country_info.name,
+                type="Country",
+                country=country_info.official_name
+                if hasattr(country_info, "official_name")
+                else country_info.name,
+                custom_properties={
+                    "x_opencti_location_type": "Country",
+                    "x_opencti_aliases": [
+                        country_info.official_name
+                        if hasattr(country_info, "official_name")
+                        else country_info.name
+                    ],
+                },
+            )
             self.helper.api.stix_sighting_relationship.create(
                 fromId=observable_id,
                 toId=country["id"],
                 count=val,
-                confidence=self.helper.connect_confidence_level
+                confidence=self.helper.connect_confidence_level,
             )
         return f"{ip} found in CrowdSec CTI. Enrichment complete"
 
     def _process_message(self, data: Dict) -> str:
-        self.helper.log_info("CrowdSec connector received " + json.dumps(data))
+        self.helper.log_debug("CrowdSec connector received " + json.dumps(data))
         entity_id = data["entity_id"]
         observable = self.helper.api.stix_cyber_observable.read(id=entity_id)
         if observable is None:
